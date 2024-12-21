@@ -73,7 +73,17 @@ export async function mintNFT(
   imageUrl: string
 ): Promise<ethers.ContractTransaction> {
   try {
+    if (!contract) {
+      throw new Error("Contract instance is null");
+    }
+    if (!collectionName) {
+      throw new Error("collectionName is null or undefined");
+    }
+
+    console.log("Calling getMintPrice with collectionName:", collectionName);
     const mintPrice = await contract.getMintPrice(collectionName);
+
+    console.log("Mint price retrieved:", mintPrice.toString());
     
     const tx = await contract.mintNFT(
       collectionName,
@@ -88,7 +98,7 @@ export async function mintNFT(
     await tx.wait();
     return tx;
   } catch (error) {
-    console.error('Error minting NFT:', error);
+    console.error("Error minting NFT:", error);
     throw error;
   }
 }
@@ -155,12 +165,14 @@ export async function canAffordMint(contract: Contract, collectionName: string):
 
 export async function getMintPrice(contract: Contract, collectionName: string): Promise<string> {
   try {
-    const price = await contract.getMintPrice(collectionName);
-    return ethers.utils.formatEther(price);
+    const mintPrice = await contract.getMintPrice(collectionName);
+    console.log("Mint price retrieved:", mintPrice.toString());
+    return ethers.utils.formatEther(mintPrice);
   } catch (error) {
-    console.error('Error getting mint price:', error);
+    console.error("Failed to fetch mint price:", error);
     throw error;
   }
+  
 }
 
 export async function updateMintPrice(
