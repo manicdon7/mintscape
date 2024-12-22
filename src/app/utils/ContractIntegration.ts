@@ -31,12 +31,30 @@ interface NFT extends NFTMetadata {
 
 const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as string;
 
+if (!CONTRACT_ADDRESS) {
+  throw new Error("Contract address not configured");
+}
+
 export async function initializeContract(): Promise<ContractInitialization> {
   try {
     if (typeof window.ethereum !== "undefined") {
       const provider = new ethers.providers.Web3Provider(window.ethereum);
+      
+      // Log network information
+      const network = await provider.getNetwork();
+      console.log('Connected to network:', network.name, `(chainId: ${network.chainId})`);
+      
       const signer = provider.getSigner();
       const address = await signer.getAddress();
+      console.log('Signer address:', address);
+      
+      // Verify contract exists
+      const code = await provider.getCode(CONTRACT_ADDRESS);
+      if (code === '0x') {
+        console.error('No code found at address:', CONTRACT_ADDRESS);
+        throw new Error(`No contract deployed at address ${CONTRACT_ADDRESS}`);
+      }
+      
       const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
       return { provider, signer, address, contract };
     } else {
@@ -47,7 +65,6 @@ export async function initializeContract(): Promise<ContractInitialization> {
     throw error;
   }
 }
-
 export async function createCollection(
   contract: Contract,
   name: string,
@@ -55,16 +72,50 @@ export async function createCollection(
   mintPrice: string
 ): Promise<ethers.ContractTransaction> {
   try {
+    console.log("Creating collection with params:", { name, symbol, mintPrice });
+    
     const priceInWei = ethers.utils.parseEther(mintPrice);
-    const tx = await contract.createCollection(name, symbol, priceInWei, { gasLimit: 500000 });
-    await tx.wait();
+    console.log("Price in Wei:", priceInWei.toString());
+
+    // Check if collection exists first
+    try {
+      const exists = await contract.collectionExists(name);
+      if (exists) {
+        console.log("Collection already exists");
+        return null as any; // Return null to indicate no transaction needed
+      }
+    } catch (error) {
+      console.log("Error checking existence, attempting creation anyway");
+    }
+    
+    // Set a manual gas limit instead of estimation
+    const tx = await contract.createCollection(
+      name,
+      symbol,
+      priceInWei,
+      { 
+        gasLimit: 300000 // Set a reasonable fixed gas limit
+      }
+    );
+    
+    console.log("Transaction sent:", tx.hash);
     return tx;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error creating collection:', error);
+    
+    // Handle specific error cases
+    if (error?.data?.message?.includes("Collection already exists")) {
+      console.log("Collection already exists (caught during transaction)");
+      return null as any; // Return null to indicate no transaction needed
+    }
+    
+    if (error.code === 'UNPREDICTABLE_GAS_LIMIT') {
+      throw new Error('Collection might already exist or transaction parameters are invalid');
+    }
+    
     throw error;
   }
 }
-
 export async function mintNFT(
   contract: Contract,
   collectionName: string,
@@ -80,9 +131,23 @@ export async function mintNFT(
       throw new Error("collectionName is null or undefined");
     }
 
-    console.log("Calling getMintPrice with collectionName:", collectionName);
-    const mintPrice = await contract.getMintPrice(collectionName);
+    // Add debugging for contract address and collection
+    console.log("Contract address:", contract.address);
+    console.log("Collection name:", collectionName);
+    
+    // Check if collection exists
+    try {
+      const exists = await contract.collectionExists(collectionName);
+      if (!exists) {
+        throw new Error(`Collection "${collectionName}" does not exist`);
+      }
+    } catch (error) {
+      console.error("Error checking collection:", error);
+      throw new Error(`Collection "${collectionName}" does not exist or cannot be accessed`);
+    }
 
+    console.log("Getting mint price...");
+    const mintPrice = await contract.getMintPrice(collectionName);
     console.log("Mint price retrieved:", mintPrice.toString());
     
     const tx = await contract.mintNFT(
@@ -95,10 +160,17 @@ export async function mintNFT(
         gasLimit: 500000 
       }
     );
-    await tx.wait();
+    
+    console.log("Transaction sent:", tx.hash);
+    const receipt = await tx.wait();
+    console.log("Transaction confirmed:", receipt);
+    
     return tx;
   } catch (error) {
     console.error("Error minting NFT:", error);
+    if ((error as any).code === 'CALL_EXCEPTION') {
+      throw new Error(`Contract call failed: ${(error as any).method}. Please verify the collection exists and you have the right permissions.`);
+    }
     throw error;
   }
 }

@@ -4,43 +4,75 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast, ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import { Upload, Image as ImageIcon, Wand2 } from "lucide-react";
+import { ethers } from "ethers";
 import Connect from "./connect";
 import { uploadToPinata } from "@/app/utils/pinataUtils";
-import { initializeContract, mintNFT } from "@/app/utils/ContractIntegration";
+import {
+  initializeContract,
+  mintNFT,
+  createCollection,
+  getCollection,
+  getMintPrice,
+  getNFTMetadata,
+  getUserNFTs,
+} from "@/app/utils/ContractIntegration";
 import axios from "axios";
 
-export default function EnhancedNFTMinter() {
-  const [mode, setMode] = useState("upload");
-  const [prompt, setPrompt] = useState("");
-  const [image, setImage] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [contract, setContract] = useState(null);
-  const [wallet, setWallet] = useState(null);
-  const [showMintDialog, setShowMintDialog] = useState(false);
-  const [mintDetails, setMintDetails] = useState({
+// Type definitions
+interface MintDetails {
+  name: string;
+  description: string;
+  collectionName: string;
+}
+
+interface PinataResponse {
+  imageUrl: string;
+  [key: string]: any;
+}
+
+export default function EnhancedNFTMinter(): JSX.Element {
+  const [mode, setMode] = useState<"upload" | "ai">("upload");
+  const [prompt, setPrompt] = useState<string>("");
+  const [image, setImage] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(false);
+  const [contract, setContract] = useState<ethers.Contract | null>(null);
+  const [wallet, setWallet] = useState<string | null>(null);
+  const [collectionExists, setCollectionExists] = useState<boolean>(false);
+  const [showMintDialog, setShowMintDialog] = useState<boolean>(false);
+  const [mintDetails, setMintDetails] = useState<MintDetails>({
     name: "",
     description: "",
     collectionName: "Default",
   });
-  const fileInputRef = useRef(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const initContract = async () => {
       try {
+        if (!window.ethereum) {
+          toast.error("Please install MetaMask to use this application");
+          return;
+        }
+
+        await window.ethereum.request({ method: "eth_requestAccounts" });
         const { contract: newContract, address } = await initializeContract();
         setContract(newContract);
         setWallet(address);
+        toast.success("Wallet connected successfully!");
       } catch (error) {
         console.error("Failed to initialize contract:", error);
-        toast.error("Failed to connect to wallet. Please ensure MetaMask is installed and connected.");
+        toast.error(
+          "Failed to connect to wallet. Please ensure MetaMask is installed and connected."
+        );
       }
     };
-  
+
     initContract();
   }, []);
 
-  const handleFileUpload = async (event) => {
-    const file = event.target.files[0];
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (!file) return;
 
     try {
@@ -48,21 +80,23 @@ export default function EnhancedNFTMinter() {
 
       const reader = new FileReader();
       reader.onloadend = () => {
-        setImage(reader.result);
+        setImage(reader.result as string);
         setShowMintDialog(true);
       };
       reader.readAsDataURL(file);
 
       toast.success("Image uploaded successfully!");
     } catch (error) {
-      toast.error(error.message || "Failed to upload image");
+      console.error("Error during file upload:", error);
+      toast.error(
+        error instanceof Error ? error.message : "Failed to upload image"
+      );
     } finally {
       setLoading(false);
     }
   };
 
-
-  const generateImage = async () => {
+  const generateImage = async (): Promise<void> => {
     if (!prompt.trim()) {
       toast.warning("Please enter a prompt");
       return;
@@ -93,57 +127,104 @@ export default function EnhancedNFTMinter() {
         setImage(`data:image/png;base64,${base64Image}`);
         setShowMintDialog(true);
         toast.success("Image generated successfully!");
+      } else {
+        toast.error("Failed to generate image. Please try again.");
       }
     } catch (error) {
-      toast.error(error.response?.data?.message || "Failed to generate image");
+      console.error("Error generating image:", error);
+      toast.error(
+        axios.isAxiosError(error)
+          ? error.response?.data?.message || "Failed to generate image"
+          : "Failed to generate image"
+      );
     } finally {
       setLoading(false);
     }
   };
 
-  const handleMint = async () => {
+  const ensureCollection = async (): Promise<void> => {
+    try {
+      console.log("Checking collection existence for:", mintDetails.collectionName);
+
+      if (!contract) {
+        throw new Error("Contract not initialized");
+      }
+
+      // const exists = await contract.collectionExists(mintDetails.collectionName);
+      // if (exists) {
+      //   console.log("Collection exists, proceeding with mint...");
+      //   setCollectionExists(true);
+      //   return;
+      // }
+
+      setLoading(true);
+      toast.info("Creating new collection...");
+
+      const tx = await createCollection(
+        contract,
+        mintDetails.collectionName,
+        "DEF",
+        "0.01"
+      );
+
+      toast.info("Please wait for collection creation to complete...");
+      await tx.wait();
+
+      console.log("Collection created successfully:", tx.hash);
+      setCollectionExists(true);
+      toast.success("Collection created successfully!");
+    } catch (error) {
+      console.error("Error ensuring collection:", error);
+      toast.error("Failed to handle collection. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMint = async (): Promise<void> => {
     if (!image || !mintDetails.name) {
       toast.warning("Please fill in all required fields");
       return;
     }
-  
+
     try {
       setLoading(true);
-  
-      // Upload to Pinata first
+
+      if (!contract) {
+        throw new Error("Contract not initialized");
+      }
+
       const pinataResponse = await uploadToPinata(image, {
         name: mintDetails.name,
         description: mintDetails.description,
         prompt: mode === "ai" ? prompt : undefined,
-      });
-  
-      // Check if we need to initialize contract
-      let contractInstance = contract;
-      if (!contractInstance) {
-        const { contract: newContract, address } = await initializeContract();
-        setContract(newContract);
-        setWallet(address);
-        contractInstance = newContract;
-      }
-  
-      if (!contractInstance) {
-        throw new Error("Failed to initialize contract");
-      }
-  
-      // Now use the contract instance
-      await mintNFT(
-        contractInstance,
+      },"");
+
+      await ensureCollection();
+
+      toast.info("Preparing to mint NFT...");
+
+      const mintPrice = await contract.getMintPrice(mintDetails.collectionName);
+      console.log("Mint price:", ethers.utils.formatEther(mintPrice));
+
+      const tx = await mintNFT(
+        contract,
         mintDetails.collectionName,
         mintDetails.name,
         mintDetails.description,
         pinataResponse.imageUrl
       );
-  
+
+      toast.info("Please confirm the transaction in MetaMask...");
+      await tx.wait();
+
       setShowMintDialog(false);
       toast.success("NFT minted successfully! 🎉");
     } catch (error) {
       console.error("Mint error:", error);
-      toast.error(error.message || "Failed to mint NFT");
+      toast.error(
+        error instanceof Error ? error.message : "Failed to mint NFT. Please try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -164,6 +245,15 @@ export default function EnhancedNFTMinter() {
         pauseOnHover
         theme="dark"
       />
+
+{loading && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white p-4 rounded-lg shadow-lg">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto"></div>
+            <p className="text-center mt-2">Processing transaction...</p>
+          </div>
+        </div>
+      )}
 
       {/* Animated background elements */}
       <motion.div 
